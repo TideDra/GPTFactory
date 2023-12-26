@@ -10,6 +10,10 @@ It currently support some awesome features:
  - 🚀 Limitation Checker that controls your API usage under the limitation and maximize efficiency.
  - 🚀 Easily resume task from checkpoint if it is interupted.
 
+## Release Log
+ - v0.1.0: Support input few-shot examples
+ - v0.0.1: Release GPTFactory
+
 ## Installation
 ```bash
 git clone https://github.com/TideDra/GPTFactory
@@ -22,7 +26,7 @@ pip install .
 from GPTFactory import GPT
 chatbot = GPT(model='gpt-3.5-turbo',service='oai',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT)
 prompt = 'hello'
-output = chatbot.single_turn(prompt)
+output = chatbot.complete(prompt)
 print(output.response)
 ```
 
@@ -34,7 +38,32 @@ checker = LimitationChecker(token_rate_limit=10000, request_rate_limit=10)
 chatbot = GPT(model='gpt-4-vision-preview',service='azure',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT,limitation_checker=checker)
 prompt = 'describe this image <img1>, and describe this image too <img2>.'
 images = {"img1":'./img1.jpg',"img2":'./img2.jpg'}
-output = chatbot.single_turn(prompt,images)
+output = chatbot.complete(prompt,images)
+print(output.response)
+```
+
+### Single-turn chat with a multimodal chatbot given few-shot examples
+```python
+from GPTFactory import GPT
+from GPTFactory import LimitationChecker
+checker = LimitationChecker(token_rate_limit=10000, request_rate_limit=10)
+chatbot = GPT(model='gpt-4-vision-preview',service='azure',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT,limitation_checker=checker)
+prompt = [
+    {
+        "role": "user",
+        "content": "<img1>describe this image."
+    },
+    {
+        "role": "assistant",
+        "content": "There is a dog in the image."
+    },
+    {
+        "role": "user",
+        "content": "<img2>describe this image too."
+    },
+]
+images = {"img1":'./img1.jpg',"img2":'./img2.jpg'}
+output = chatbot.complete(prompt,images)
 print(output.response)
 ```
 
@@ -89,7 +118,7 @@ with jsonlines.open(os.path.join(DATA_ROOT, "gpt4v-high_raw_answer.jsonl"), "w")
 ```
 
 ### Control the factory manually
-We also support a more fine-grained operation style for the factory.
+We also support a more flexible operation style for the factory.
 ```python
 import json
 from GPTFactory.factory import smart_build_factory

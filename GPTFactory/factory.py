@@ -110,11 +110,11 @@ class GPT:
                 })
 
         return content
-    def single_turn(self,prompt:str,images: Optional[dict[str,Union[bytes,str,PILImage]]] = None,system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
+    def complete(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None,system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
         """Get the response of a single turn.
 
         Args:
-            prompt (str): input prompt. eg. "describe this image <img1>, and this image <img2>"
+            prompt (Union[str,list]): input prompt. eg. "describe this image <img1>, and this image <img2>", or a list of turns. eg. [{"role":"user","content":"describe this image <img1>, and this image <img2>"},{"role":"assistant","content":"hello"}]
             images (Optioanl[dict]): a dict of image name and image. The image can be the file path, PILImage or bytes of the image. eg. {"img1": "img1.jpg", "img2": <PILImage>}
             system_message (Optional[str], optional): The system message. Currently, we recommend not to use a customized system message, since it seems to make the model refuse to answer some questions. Defaults to None.
             detail (Literal["low","high","auto"], optional): The detail level of the image. Defaults to "auto".
@@ -126,7 +126,6 @@ class GPT:
             logger.warning(f"You're using a single-modal model {self.model}, but you give images. The images will be ignored.")
 
         detail = detail or self.default_detail
-        content = self.parse_prompt(prompt,images,detail) if self.__is_multimodal else prompt
 
         if self.service == "oai":
             headers = {
@@ -152,10 +151,20 @@ class GPT:
                     }
                 ] if self.__is_multimodal else system_message
             })
-        messages.append({
-            "role": "user",
-            "content": content
-        })
+        if isinstance(prompt,str):
+            messages.append({
+                "role": "user",
+                "content": self.parse_prompt(prompt,images,detail) if self.__is_multimodal else prompt
+            })
+        elif isinstance(prompt,list):
+            for turn in prompt:
+                role = turn['role']
+                content = turn['content']
+                content = self.parse_prompt(content,images,detail) if self.__is_multimodal else content
+                messages.append({
+                    "role": role,
+                    "content": content
+                })
         payload = {
           "messages": messages,
           "temperature": temperature or self.default_temperature,
@@ -185,7 +194,6 @@ class GPT:
                     time.sleep(2)
                 else:
                     return None
-            
     def wait(self):
         if self.LimitationChecker is not None:
             self.LimitationChecker.wait()
@@ -254,7 +262,7 @@ class GPTFactory:
                 continue
             id = args.pop('id',None)
             job_id = args.pop('job_id',None)
-            response = chatbot.single_turn(**args)
+            response = chatbot.complete(**args)
             if id is not None:
                 args['id'] = id
             output = GPTFactoryOutput(id,args,response,job_id)
@@ -307,11 +315,11 @@ class GPTFactory:
     def __put(self,args:dict):
         self.__job_queue.put(args)
 
-    def put(self,prompt:str,images: Optional[dict[str,Union[bytes,str,PILImage]]], system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None, id: Optional[Any] = None) -> None:
+    def put(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]], system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None, id: Optional[Any] = None) -> None:
         """Put a job into the job queue. You can get the result by calling `get()`.
 
         Args:
-            prompt (str): input prompt. eg. "describe this image <img1>, and this image <img2>"
+            prompt (str): input prompt. eg. "describe this image <img1>, and this image <img2>", or a list of turns. eg. [{"role":"user","content":"describe this image <img1>, and this image <img2>"},{"role":"assistant","content":"hello"}]
             images (Optioanl[dict]): a dict of image name and image. The image can be the file path, PILImage or bytes of the image. eg. {"img1": "img1.jpg", "img2": <PILImage>}
             system_message (Optional[str], optional): The system message. Currently, we recommend not to use a customized system message, since it seems to make the model refuse to answer some questions. Defaults to None.
             detail (Literal["low","high","auto"], optional): The detail level of the image. Defaults to "auto".
