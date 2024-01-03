@@ -167,9 +167,9 @@ class GPT:
                 })
         payload = {
           "messages": messages,
-          "temperature": temperature or self.default_temperature,
-          "top_p": top_p or self.default_top_p,
-          "max_tokens": max_tokens or self.default_max_tokens,
+          "temperature": temperature if temperature is not None else self.default_temperature,
+          "top_p": top_p if top_p is not None else self.default_top_p,
+          "max_tokens": max_tokens if max_tokens is not None else self.default_max_tokens,
           "model": self.model
         }
 

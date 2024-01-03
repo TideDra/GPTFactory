@@ -11,6 +11,7 @@ It currently support some awesome features:
  - 🚀 Easily resume task from checkpoint if it is interupted.
 
 ## Release Log
+ - v0.1.1: fix hyperparameter bugs
  - v0.1.0: Support input few-shot examples
  - v0.0.1: Release GPTFactory
 
