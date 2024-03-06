@@ -1,6 +1,7 @@
 import os
 import requests
 from typing import Optional,Sequence,Dict,Union,Literal,Any
+from .limitation_checker import LimitationChecker
 import base64
 from loguru import logger
 import time
@@ -17,7 +18,7 @@ from io import BytesIO
 from itertools import cycle
 MULTIMODAL_MODELS = ["gpt-4-vision-preview"]
 class GPT:
-    def __init__(self,model:str, service:Literal["azure","oai"] = 'azure',api_key:Optional[str] = None,end_point:Optional[str] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800) -> None:
+    def __init__(self,model:str, service:Literal["azure","oai"] = 'azure',api_key:Optional[str] = None,end_point:Optional[str] = None, limitation_checker:Optional[LimitationChecker] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800) -> None:
         """A GPT interface.
 
         Args:
@@ -25,6 +26,7 @@ class GPT:
             service (Literal["azure","oai"], optional): The service you use. Set to 'azure' if you use Azure OpenAI service, or 'oai' if you use OpenAI service. Defaults to 'azure'.
             api_key (Optional[str], optional): The API key. If you don't give the api key, we will try to get it from environment variable `GPT_KEY`. Defaults to None.
             end_point (Optional[str], optional): The endpoint. If you don't give the end point, we will try to get it from environment varaible `GPT_ENDPOINT`. Defaults to None.
+            limitation_checker (Optional[LimitationChecker], optional): A Limitation checker to ensure that the api usage is under limitation. Defaults to None.
             system_message (Optional[str], optional): The system message. Currently, we recommend not to use a customized system message, since it seems to make the model refuse to answer some questions. Defaults to None.
             detail (Literal["low","high","auto"], optional): The detail level of the image. This argument is only used when you use a multimodal model. Defaults to "auto".
             temperature (float, optional): GPT temperature. Defaults to 0.7.
@@ -38,6 +40,7 @@ class GPT:
         assert end_point is not None, "Please set GPT_ENDPOINT in environment variable or pass it as an argument."
         self.api_key = api_key
         self.end_point = end_point
+        self.LimitationChecker = limitation_checker
         self.default_system_message = system_message
         self.default_temperature = temperature
         self.default_top_p = top_p
@@ -118,9 +121,6 @@ class GPT:
             temperature (float, optional): GPT temperature. Defaults to 0.7.
             top_p (float, optional): GPT top_p. Defaults to 0.95.
             max_tokens (int, optional): GPT max tokens. Defaults to 800.
-            retry (int, optional): The number of retries. Defaults to -1, meaning retring forever.
-            debug (bool, optional): Whether to print debug information. Defaults to False.
-            delay (int, optional): The delay time between retries. Defaults to 2.
         """
         if not self.__is_multimodal and images is not None:
             logger.warning(f"You're using a single-modal model {self.model}, but you give images. The images will be ignored.")
@@ -157,9 +157,6 @@ class GPT:
                 "content": self.parse_prompt(prompt,images,detail) if self.__is_multimodal else prompt
             })
         elif isinstance(prompt,list):
-            # Given system message overwrites the default system message
-            if prompt[0]['role'] == 'system':
-                messages = []
             for turn in prompt:
                 role = turn['role']
                 content = turn['content']
@@ -177,21 +174,36 @@ class GPT:
         }
 
         # Send request
-        while retry!=0:
+        while retry != 0:
             try:
+                if self.LimitationChecker is not None:
+                    self.LimitationChecker.wait()
+                    request_time = time.time()
+                    self.LimitationChecker.record_request(request_time)
                 response = requests.post(self.end_point, headers=headers, json=payload)
                 response.raise_for_status()  # Will raise an HTTPError if the HTTP request returned an unsuccessful status code
                 response = response.json()
+                if self.LimitationChecker is not None:
+                    token_num = None
+                    if self.LimitationChecker.token_rate_limit is not None:
+                        token_num = response['usage']['prompt_tokens']
+                    self.LimitationChecker.record_token(request_time,token_num)
                 return response['choices'][0]['message']['content']
             except requests.RequestException as e:
                 if debug:
                     logger.exception(e)
                 if 'Too Many Requests' in str(e):
+
                     time.sleep(delay)
                 else:
                     return None
             retry -= 1
         return -1
+
+    def wait(self):
+        if self.LimitationChecker is not None:
+            self.LimitationChecker.wait()
+
 
 @dataclass
 class GPTFactoryOutput:
@@ -201,21 +213,27 @@ class GPTFactoryOutput:
     job_id: int = None
 
 class GPTFactory:
-    def __init__(self,keys_endpoints:Sequence[Dict[str,str]],model:str,service:Literal["azure","oai"]='azure',system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto" ,temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,debug=False) -> None:
+    def __init__(self,keys_endpoints:Sequence[Dict[str,str]],model:str,service:Literal["azure","oai"]='azure', limitation_checker:Optional[Union[LimitationChecker,Sequence[LimitationChecker]]] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto" ,temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,debug=False) -> None:
         """A Factory containing multiple GPT chatbot, which can process multiple jobs at the same time.
         
         Args:
             keys_endpoints (Sequence[Dict[str,str]]): A list of dict, each dict contains the api key and endpoint. eg. [{"api_key":"xxx","end_point":"xxx"},{"api_key":"xxx","end_point":"xxx"}]
             model (str): The ChatGPT model name. Check https://platform.openai.com/docs/models for more details. Or check Azure OpenAI Studio Model deployment if you use Azure service.
             service (Literal["azure","oai"], optional): The service you use. Set to 'azure' if you use Azure OpenAI service, or 'oai' if you use OpenAI service. Defaults to 'azure'.
+            limitation_checker (Optional[Union[LimitationChecker,Sequence[LimitationChecker]]], optional): A Limitation checker to ensure that the api usage is under limitation. Defaults to None.
             system_message (Optional[str], optional): The system message. Currently, we recommend not to use a customized system message, since it seems to make the model refuse to answer some questions. Defaults to None.
             detail (Literal["low","high","auto"], optional): The detail level of the image. Defaults to "auto".
             temperature (float, optional): GPT temperature. Defaults to 0.7.
             top_p (float, optional): GPT top_p. Defaults to 0.95.
             max_tokens (int, optional): GPT max tokens. Defaults to 800.
-
+            debug (bool, optional): Whether to print debug information. Defaults to False.
         """
         self.keys_endpoints = keys_endpoints
+        if not isinstance(limitation_checker,Sequence):
+            limitation_checker = [limitation_checker for _ in range(len(keys_endpoints))]
+        else:
+            assert len(limitation_checker) == len(keys_endpoints), "You specify LimitationChecker for each API. But the number of limitation_checker is not the same as the number of APIs."
+        self.LimitationChecker = limitation_checker
         self.default_system_message = system_message
         self.default_temperature = temperature
         self.default_top_p = top_p
@@ -261,10 +279,10 @@ class GPTFactory:
 
     def __init_chatbots(self):
         self.chatbots = []
-        for key_endpoint in self.keys_endpoints:
+        for key_endpoint,limitation_checker in zip(self.keys_endpoints,self.LimitationChecker):
             api_key = key_endpoint['api_key']
             end_point = key_endpoint['end_point']
-            chatbot = GPT(self.model,self.service,api_key,end_point,self.default_system_message,self.default_detail,self.default_temperature,self.default_top_p,self.default_max_tokens)
+            chatbot = GPT(self.model,self.service,api_key,end_point,limitation_checker,self.default_system_message,self.default_detail,self.default_temperature,self.default_top_p,self.default_max_tokens)
             self.chatbots.append(chatbot)
             
     
@@ -459,14 +477,16 @@ class GPTFactory:
         return results
 
 
-def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure","oai"]='azure',worker_num:Optional[int] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,debug:bool=False) -> GPTFactory:
+def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure","oai"]='azure',worker_num:Optional[int] = None,rpm:Optional[int] = None,tpm:Optional[int] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,debug=False) -> GPTFactory:
     """Build a GPTFactory with any number of worker. The api each worker used is smartly assigned, to balance the workload.
 
     Args:
-        api_info (Sequence[Dict]): A list of dict, each dict contains the api key and endpoint. eg. [{"api_key":"xxx","end_point":"xxx"},{"api_key":"xxx","end_point":"xxx"}]
+        api_info (Sequence[Dict]): A list of dict, each dict contains the api key and endpoint. eg. [{"api_key":"xxx","end_point":"xxx","tpm":800,"rpm":10},{"api_key":"xxx","end_point":"xxx","tpm":800,"rpm":10}]
         model (str): The ChatGPT model name. Check https://platform.openai.com/docs/models for more details. Or check Azure OpenAI Studio Model deployment if you use Azure service.
         service (Literal["azure","oai"], optional): The service you use. Set to 'azure' if you use Azure OpenAI service, or 'oai' if you use OpenAI service. Defaults to 'azure'.
         worker_num (Optional[int], optional): The number of workers. If None, we will use the number of api_info. Defaults to None.
+        rpm (Optional[int], optional): The request rate limit per minute. This will be used if you don't specify rpm in api_info. Defaults to None.
+        tpm (Optional[int], optional): The token rate limit per minute. This will be used if you don't specify tpm in api_info. Defaults to None.
         detail (Literal["low","high","auto"], optional): The detail level of the image. Defaults to "auto".
         temperature (float, optional): GPT temperature. Defaults to 0.7.
         top_p (float, optional): GPT top_p. Defaults to 0.95.
@@ -478,10 +498,17 @@ def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure
     """
     if worker_num is None:
         worker_num = len(api_info)
-    if worker_num % len(api_info) != 0:
-        logger.warning(f"The worker_num {worker_num} is not a multiple of the number of api_info {len(api_info)}. The workload may not be balanced.")
-
+    if worker_num < len(api_info):
+        logger.warning(f"The worker_num {worker_num} is smaller than the number of given APIs {len(api_info)}. Only the first {worker_num} APIs (sorted by RPM) will be used.")
+    api_info = sorted(api_info,key=lambda x:getattr(x,'rpm',rpm or -1),reverse=True) # API with larger rpm will be assigned to more workers
+    unique_limitation_checker = []
+    for i in range(len(api_info)):
+        tpm = getattr(api_info[i],'tpm',tpm)
+        rpm = getattr(api_info[i],'rpm',rpm)
+        unique_limitation_checker.append(LimitationChecker(tpm,rpm) if tpm is not None or rpm is not None else None)
     keys_endpoints = []
+    limitation_checker_for_each_worker = []
     for i in range(worker_num):
         keys_endpoints.append(api_info[i%len(api_info)])
-    return GPTFactory(keys_endpoints,model,service,system_message,detail,temperature,top_p,max_tokens,debug)
+        limitation_checker_for_each_worker.append(unique_limitation_checker[i%len(unique_limitation_checker)])
+    return GPTFactory(keys_endpoints,model,service,limitation_checker_for_each_worker,system_message,detail,temperature,top_p,max_tokens,debug)
