@@ -28,7 +28,7 @@ setup(
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
     ],
-    install_requires=['requests','loguru'],
+    install_requires=['requests','loguru','tqdm','pillow'],
     python_requires='>=3.5',
     license='MIT license',
 )
