@@ -17,6 +17,7 @@ class LimitationChecker:
         self.delay = 60 / request_rate_limit
         self.request_history = []
         self.token_history = []
+        self.adviced_sleep_time = dict(advice_timestamp=0,advice_sleep=0)
         self.lock = Lock()
     
     def record_token(self,request_time:int,used_token_num:int = None):
@@ -79,4 +80,6 @@ class LimitationChecker:
                 now = time.time()
                 sleep_time = max(self.delay - (now - last_request_time),self.delay)
                 #logger.info(f"Sleep {sleep_time} seconds to wait for the limitation.")
-                time.sleep(sleep_time)
+                adviced_sleep_duration = max(self.adviced_sleep_time['advice_timestamp'] + self.adviced_sleep_time['advice_sleep'] - now,0)
+                final_sleep_time = max(sleep_time,adviced_sleep_duration)
+                time.sleep(final_sleep_time)

@@ -118,7 +118,7 @@ class GPT:
                 })
 
         return content
-    def complete(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None,system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None,retry:int=-1,debug:bool=False,delay:int=2) -> str:
+    def complete(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None,system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None,retry:int=-1,debug:bool=False,delay:int=2,timeout:int=60) -> str:
         """Get the response of a single turn.
 
         Args:
@@ -129,6 +129,10 @@ class GPT:
             temperature (float, optional): GPT temperature. Defaults to 0.7.
             top_p (float, optional): GPT top_p. Defaults to 0.95.
             max_tokens (int, optional): GPT max tokens. Defaults to 800.
+            retry (int, optional): The number of retries. Defaults to -1.
+            debug (bool, optional): Whether to print debug information. Defaults to False.
+            delay (int, optional): The delay between retries. Defaults to 2.
+            timeout (int, optional): The timeout for each request. Defaults to 60.
         """
         logger.setLevel("DEBUG") if debug else logger.setLevel("INFO")
         if not self.__is_multimodal and images is not None:
@@ -190,7 +194,8 @@ class GPT:
                     self.LimitationChecker.wait()
                     request_time = time.time()
                     self.LimitationChecker.record_request(request_time)
-                response = requests.post(self.end_point, headers=headers, json=payload)
+                logger.debug(f"Send request to {self.end_point}.")
+                response = requests.post(self.end_point, headers=headers, json=payload,timeout=timeout)
                 response.raise_for_status()  # Will raise an HTTPError if the HTTP request returned an unsuccessful status code
                 response = response.json()
                 if self.LimitationChecker is not None:
@@ -200,6 +205,10 @@ class GPT:
                     self.LimitationChecker.record_token(request_time,token_num)
                 self.set_running(False)
                 return response['choices'][0]['message']['content']
+            except requests.exceptions.Timeout as e:
+                logger.debug(e)
+                self.set_running(False)
+                return requests.exceptions.Timeout()
             except requests.RequestException as e:
                 logger.debug(e)
                 if 'Too Many Requests' in str(e):
@@ -209,6 +218,11 @@ class GPT:
                     if sleep_seconds is not None:
                         sleep_seconds = int(sleep_seconds.group(1))
                         logger.debug(f"Too Many Requests. Sleep for {sleep_seconds} seconds.")
+                        if self.LimitationChecker is not None:
+                            self.LimitationChecker.adviced_sleep_time.update(
+                                advice_timestamp = time.time(),
+                                advice_sleep = sleep_seconds+0.2
+                            )
                         time.sleep(sleep_seconds)
                     else:
                         time.sleep(delay)
@@ -278,7 +292,7 @@ class GPTFactory:
         self.__started = False
         self.debug = debug
         self.__init_chatbots()
-    
+        self.__all_futures = []
     def set_default_value(self,name:Literal["system_message","temperature","top_p","max_tokens","detail"],value:Any) -> None:
         assert name in ["system_message","temperature","top_p","max_tokens","detail"], f"The attribute {name} does not exist!"
         if name == "system_message":
@@ -305,9 +319,9 @@ class GPTFactory:
 
         if id is not None:
             args['id'] = id
-        output = GPTFactoryOutput(id,args,response,job_id)
         if job_id is not None:
             args['job_id'] = job_id
+        output = GPTFactoryOutput(id,args,response,job_id)
         return output
 
 
@@ -345,8 +359,16 @@ class GPTFactory:
         self.stop()
         self.start()
 
+    def timeout_rerun_callback(self,future):
+        output = future.result()
+        if isinstance(output.response,requests.exceptions.Timeout):
+            raw_input = output.input
+            new_future = self.__put(raw_input)
+            self.__all_futures.append(new_future)
+
     def __put(self,args:dict):
         future = self.executor.submit(self.__worker,args)
+        future.add_done_callback(self.timeout_rerun_callback)
         return future
 
     def put(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None, system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None, id: Optional[Any] = None,**kwargs) -> futures.Future:
@@ -454,7 +476,7 @@ class GPTFactory:
         if inputs is None and resume_from_checkpoint is None:
             logger.exception("You give neither inputs nor resume_from_checkpoint. Please give one of them!")
             raise ValueError
-        futures = []
+        self.__all_futures:list[futures.Future] = []
         if self.__started:
             logger.warning("The factory has already started. We will empty the job queue and result queue, and restart the factory!")
             self.stop()
@@ -474,7 +496,7 @@ class GPTFactory:
                 error_jobs = []
             for input in inputs:
                 if 'complete' not in input:
-                    futures.append(self.put(**input))
+                    self.__all_futures.append(self.put(**input))
 
         else:
             results = []
@@ -483,13 +505,13 @@ class GPTFactory:
             logger.info(f"Start processing {len(inputs)} inputs.")
             for idx,input in enumerate(inputs):
                 input['job_id'] = idx # this job_id is used to identify the raw input of the output
-                futures.append(self.put(**input))
+                self.__all_futures.append(self.put(**input))
         
         progress_bar = Progress(
             TextColumn("[progress.description]{task.description}"),
             SpinnerColumn(),
             BarColumn(),
-            TaskProgressColumn(),
+            TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             TextColumn("<"),
             TimeRemainingColumn(),
@@ -498,8 +520,13 @@ class GPTFactory:
         job_tracker = progress_bar.add_task("Running Tasks", total=len(inputs),errors=0,visible=show_progress)
         step = len(results)
         with progress_bar:
-            for future in futures:
+            while len(self.__all_futures) > 0:
+                future = self.__all_futures.pop(0)
                 output = future.result()
+                if isinstance(output.response,requests.exceptions.Timeout):
+                    if len(self.__all_futures) == 0:
+                        time.sleep(3)
+                    continue
                 job_id = output.job_id
                 inputs[job_id]['complete'] = True
                 if output.response is None:
