@@ -3,7 +3,7 @@ try:
 except ImportError:
     from distutils.core import setup
 
-VERSION = '0.1.1'
+VERSION = '0.2.0'
 
 setup(
     name='GPTFactory',
@@ -28,7 +28,7 @@ setup(
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
     ],
-    install_requires=['requests','loguru'],
+    install_requires=['requests','rich','pillow'],
     python_requires='>=3.5',
     license='MIT license',
 )

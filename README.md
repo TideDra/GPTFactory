@@ -11,6 +11,7 @@ It currently support some awesome features:
  - 🚀 Easily resume task from checkpoint if it is interupted.
 
 ## Release Log
+ - v0.2.0: use concurrent as multithreading backend; use rich to log.
  - v0.1.1: fix hyperparameter bugs
  - v0.1.0: Support input few-shot examples
  - v0.0.1: Release GPTFactory
@@ -28,27 +29,23 @@ from GPTFactory import GPT
 chatbot = GPT(model='gpt-3.5-turbo',service='oai',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT)
 prompt = 'hello'
 output = chatbot.complete(prompt)
-print(output.response)
+print(output)
 ```
 
 ### Single-turn chat with a multimodal chatbot
 ```python
 from GPTFactory import GPT
-from GPTFactory import LimitationChecker
-checker = LimitationChecker(token_rate_limit=10000, request_rate_limit=10)
-chatbot = GPT(model='gpt-4-vision-preview',service='azure',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT,limitation_checker=checker)
+chatbot = GPT(model='gpt-4-vision-preview',service='azure',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT)
 prompt = 'describe this image <img1>, and describe this image too <img2>.'
 images = {"img1":'./img1.jpg',"img2":'./img2.jpg'}
 output = chatbot.complete(prompt,images)
-print(output.response)
+print(output)
 ```
 
 ### Single-turn chat with a multimodal chatbot given few-shot examples
 ```python
 from GPTFactory import GPT
-from GPTFactory import LimitationChecker
-checker = LimitationChecker(token_rate_limit=10000, request_rate_limit=10)
-chatbot = GPT(model='gpt-4-vision-preview',service='azure',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT,limitation_checker=checker)
+chatbot = GPT(model='gpt-4-vision-preview',service='azure',api_key=YOUR_API_KEY,end_point=YOUR_END_POINT)
 prompt = [
     {
         "role": "user",
@@ -65,7 +62,7 @@ prompt = [
 ]
 images = {"img1":'./img1.jpg',"img2":'./img2.jpg'}
 output = chatbot.complete(prompt,images)
-print(output.response)
+print(output)
 ```
 
 ### Process a batch of inputs using a factory
