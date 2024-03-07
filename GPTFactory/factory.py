@@ -3,11 +3,13 @@ import requests
 from typing import Optional,Sequence,Dict,Union,Literal,Any
 from .limitation_checker import LimitationChecker
 import base64
-from loguru import logger
+import logging
+from rich.logging import RichHandler
 import time
 from concurrent import futures
+from threading import Lock
 from dataclasses import dataclass
-from tqdm import tqdm
+from rich.progress import Progress,SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn,TimeRemainingColumn,TaskProgressColumn
 from copy import deepcopy
 import json
 import pickle
@@ -16,6 +18,10 @@ import shutil
 from PIL.Image import Image as PILImage
 from io import BytesIO
 from itertools import cycle
+import re
+logger = logging.getLogger("rich")
+logger.addHandler(RichHandler(markup=True))
+logger.setLevel("INFO")
 MULTIMODAL_MODELS = ["gpt-4-vision-preview"]
 class GPT:
     def __init__(self,model:str, service:Literal["azure","oai"] = 'azure',api_key:Optional[str] = None,end_point:Optional[str] = None, limitation_checker:Optional[LimitationChecker] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800) -> None:
@@ -49,6 +55,8 @@ class GPT:
         self.model = model
         self.service = service
         self.__is_multimodal = self.model in MULTIMODAL_MODELS
+        self.__running = False
+        self.__runing_lock = Lock()
     def encode_image_to_bytes(self,image:Union[str,bytes,PILImage]) -> str:
         if isinstance(image,str):
             encoded_image = base64.b64encode(open(image, 'rb').read())
@@ -122,6 +130,7 @@ class GPT:
             top_p (float, optional): GPT top_p. Defaults to 0.95.
             max_tokens (int, optional): GPT max tokens. Defaults to 800.
         """
+        logger.setLevel("DEBUG") if debug else logger.setLevel("INFO")
         if not self.__is_multimodal and images is not None:
             logger.warning(f"You're using a single-modal model {self.model}, but you give images. The images will be ignored.")
 
@@ -174,6 +183,7 @@ class GPT:
         }
 
         # Send request
+        self.set_running(True)
         while retry != 0:
             try:
                 if self.LimitationChecker is not None:
@@ -188,22 +198,46 @@ class GPT:
                     if self.LimitationChecker.token_rate_limit is not None:
                         token_num = response['usage']['prompt_tokens']
                     self.LimitationChecker.record_token(request_time,token_num)
+                self.set_running(False)
                 return response['choices'][0]['message']['content']
             except requests.RequestException as e:
-                if debug:
-                    logger.exception(e)
+                logger.debug(e)
                 if 'Too Many Requests' in str(e):
-
-                    time.sleep(delay)
+                    error_message = response.json()['error']['message']
+                    sleep_seconds_extractor = re.compile(r".* (\d+) seconds.*")
+                    sleep_seconds = sleep_seconds_extractor.match(error_message)
+                    if sleep_seconds is not None:
+                        sleep_seconds = int(sleep_seconds.group(1))
+                        logger.debug(f"Too Many Requests. Sleep for {sleep_seconds} seconds.")
+                        time.sleep(sleep_seconds)
+                    else:
+                        time.sleep(delay)
                 else:
+                    self.set_running(False)
                     return None
             retry -= 1
+        self.set_running(False)
         return -1
 
     def wait(self):
         if self.LimitationChecker is not None:
             self.LimitationChecker.wait()
 
+    def is_running(self):
+        with self.__runing_lock:
+            return self.__running
+    
+    def set_running(self,value):
+        with self.__runing_lock:
+            self.__running = value
+    
+    def check_and_set(self):
+        with self.__runing_lock:
+            if self.__running:
+                return False
+            else:
+                self.__running = True
+                return True
 
 @dataclass
 class GPTFactoryOutput:
@@ -264,11 +298,11 @@ class GPTFactory:
         id = args.pop('id',None)
         job_id = args.pop('job_id',None)
         for chatbot in cycle(self.chatbots):
-            response = chatbot.complete(**args)
-            if response == -1:
-                continue
-            else:
+            if chatbot.check_and_set():
+                response = chatbot.complete(**args)
                 break
+            time.sleep(0.05)
+
         if id is not None:
             args['id'] = id
         output = GPTFactoryOutput(id,args,response,job_id)
@@ -278,7 +312,7 @@ class GPTFactory:
 
 
     def __init_chatbots(self):
-        self.chatbots = []
+        self.chatbots:list[GPT] = []
         for key_endpoint,limitation_checker in zip(self.keys_endpoints,self.LimitationChecker):
             api_key = key_endpoint['api_key']
             end_point = key_endpoint['end_point']
@@ -315,7 +349,7 @@ class GPTFactory:
         future = self.executor.submit(self.__worker,args)
         return future
 
-    def put(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]], system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None, id: Optional[Any] = None,**kwargs) -> None:
+    def put(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None, system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None, id: Optional[Any] = None,**kwargs) -> futures.Future:
         """Put a job into the job queue. You can get the result by calling `get()`.
 
         Args:
@@ -337,7 +371,7 @@ class GPTFactory:
             "top_p":top_p,
             "max_tokens":max_tokens,
             "id":id,
-            "retry":1,
+            "retry":-1,
             "delay":0.2,
             "debug":self.debug
         }
@@ -451,27 +485,32 @@ class GPTFactory:
                 input['job_id'] = idx # this job_id is used to identify the raw input of the output
                 futures.append(self.put(**input))
         
-        bar_format = "{percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}, {desc}]"
-        if show_progress:
-            progress_bar = tqdm(total=len(inputs),initial=len(results),bar_format=bar_format,desc=f"{len(error_jobs)} errors",dynamic_ncols=True)
+        progress_bar = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            SpinnerColumn(),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TextColumn("<"),
+            TimeRemainingColumn(),
+            TextColumn("{task.fields[errors]} errors"),
+            )
+        job_tracker = progress_bar.add_task("Running Tasks", total=len(inputs),errors=0,visible=show_progress)
         step = len(results)
-        for future in futures:
-            output = future.result()
-            job_id = output.job_id
-            inputs[job_id]['complete'] = True
-            if output.response is None:
-                error_jobs.append(inputs[job_id])
-            results.append(output)
-            if show_progress:
-                progress_bar.update(1)
-                progress_bar.set_description_str(f"{len(error_jobs)} errors")
-            step += 1
-            if save_path is not None and save_step is not None and step % save_step == 0:
-                self.__save(inputs,results,error_jobs,save_path,step,save_total_limit)
+        with progress_bar:
+            for future in futures:
+                output = future.result()
+                job_id = output.job_id
+                inputs[job_id]['complete'] = True
+                if output.response is None:
+                    error_jobs.append(inputs[job_id])
+                results.append(output)
+                progress_bar.update(job_tracker, advance=1, errors=len(error_jobs))
+                step += 1
+                if save_path is not None and save_step is not None and step % save_step == 0:
+                    self.__save(inputs,results,error_jobs,save_path,step,save_total_limit)
         self.stop()
-        if show_progress:
-            progress_bar.close()
-        logger.success(f"Successfully processing {len(results)-len(error_jobs)} inputs. {len(error_jobs)} errors. Factory stopped.")
+        logger.info(f"[bold green]Successfully processing {len(results)-len(error_jobs)} inputs. {len(error_jobs)} errors. Factory stopped.[/]")
         if save_path is not None:
             self.__save(inputs,results,error_jobs,save_path,step,save_total_limit)
         return results
