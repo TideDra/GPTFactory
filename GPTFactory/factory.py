@@ -118,7 +118,7 @@ class GPT:
                 })
 
         return content
-    def complete(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None,system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None,retry:int=-1,debug:bool=False,delay:int=2,timeout:int=60) -> str:
+    def complete(self,prompt:Union[str,list],images: Optional[dict[str,Union[bytes,str,PILImage]]] = None,system_message: Optional[str] = None,detail:Literal["low","high","auto"] = "auto",temperature:Optional[float] = None,top_p: Optional[float] = None, max_tokens: Optional[int] = None,retry:int=-1,logging_level:str="INFO",delay:int=2,timeout:int=60) -> str:
         """Get the response of a single turn.
 
         Args:
@@ -134,7 +134,7 @@ class GPT:
             delay (int, optional): The delay between retries. Defaults to 2.
             timeout (int, optional): The timeout for each request. Defaults to 60.
         """
-        logger.setLevel("DEBUG") if debug else logger.setLevel("INFO")
+        logger.setLevel(logging_level)
         if not self.__is_multimodal and images is not None:
             logger.warning(f"You're using a single-modal model {self.model}, but you give images. The images will be ignored.")
 
@@ -261,7 +261,7 @@ class GPTFactoryOutput:
     job_id: int = None
 
 class GPTFactory:
-    def __init__(self,keys_endpoints:Sequence[Dict[str,str]],model:str,service:Literal["azure","oai"]='azure', limitation_checker:Optional[Union[LimitationChecker,Sequence[LimitationChecker]]] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto" ,temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,debug=False) -> None:
+    def __init__(self,keys_endpoints:Sequence[Dict[str,str]],model:str,service:Literal["azure","oai"]='azure', limitation_checker:Optional[Union[LimitationChecker,Sequence[LimitationChecker]]] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto" ,temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,logging_level:str="INFO") -> None:
         """A Factory containing multiple GPT chatbot, which can process multiple jobs at the same time.
         
         Args:
@@ -274,7 +274,7 @@ class GPTFactory:
             temperature (float, optional): GPT temperature. Defaults to 0.7.
             top_p (float, optional): GPT top_p. Defaults to 0.95.
             max_tokens (int, optional): GPT max tokens. Defaults to 800.
-            debug (bool, optional): Whether to print debug information. Defaults to False.
+            logging_level (str, optional): The logging level. Defaults to "INFO".
         """
         self.keys_endpoints = keys_endpoints
         if not isinstance(limitation_checker,Sequence):
@@ -290,7 +290,8 @@ class GPTFactory:
         self.model = model
         self.service = service
         self.__started = False
-        self.debug = debug
+        self.logging_level = logging_level
+        logger.setLevel(logging_level)
         self.__init_chatbots()
         self.__all_futures = []
     def set_default_value(self,name:Literal["system_message","temperature","top_p","max_tokens","detail"],value:Any) -> None:
@@ -395,7 +396,7 @@ class GPTFactory:
             "id":id,
             "retry":-1,
             "delay":0.2,
-            "debug":self.debug
+            "logging_level":self.logging_level,
         }
         other_args = deepcopy(kwargs)
         args.update(other_args)
@@ -456,7 +457,7 @@ class GPTFactory:
 
         return inputs,results,error_jobs
 
-    def run_task(self, inputs: Optional[Sequence[dict]]=None,resume_from_checkpoint:Optional[str] = None,rerun_error_jobs:bool = False,save_path:Optional[str] = None,save_step:Optional[int] = None,save_total_limit:int=1,show_progress=True) -> list[GPTFactoryOutput]:
+    def run_task(self, inputs: Optional[Sequence[dict]]=None,resume_from_checkpoint:Optional[str] = None,rerun_error_jobs:bool = False,save_path:Optional[str] = None,save_step:Optional[int] = None,save_total_limit:int=1,show_progress=True,tracker:dict=None) -> list[GPTFactoryOutput]:
         """Run a bunch of jobs.
 
         Args:
@@ -467,6 +468,7 @@ class GPTFactory:
             save_step (Optional[int], optional): The step to save the checkpoint. Defaults to None.
             save_total_limit (int, optional): The maximum number of checkpoints to save. Defaults to 1.
             show_progress (bool, optional): Whether to show the progress bar. Defaults to True.
+            tracker (dict, optional): The tracker. Defaults to None.
         Returns:
             list[GPTFactoryOutput]: A list of outputs. Each output is a GPTFactoryOutput. You can get the response by `output.response`.
         """
@@ -516,15 +518,22 @@ class GPTFactory:
             TextColumn("<"),
             TimeRemainingColumn(),
             TextColumn("{task.fields[errors]} errors"),
+            disable=not show_progress
             )
-        job_tracker = progress_bar.add_task("Running Tasks", total=len(inputs),errors=0,visible=show_progress)
         step = len(results)
+        job_tracker = progress_bar.add_task("Running Tasks", total=len(inputs),errors=0,visible=show_progress,completed=step)
+        if tracker is not None:
+            tracker['completed'] = step
+            tracker['total'] = len(inputs)
         with progress_bar:
             while len(self.__all_futures) > 0:
-                future = self.__all_futures.pop(0)
+                #get a completed future
+                future = next(futures.as_completed(self.__all_futures))
+                self.__all_futures.remove(future)
                 output = future.result()
                 if isinstance(output.response,requests.exceptions.Timeout):
                     if len(self.__all_futures) == 0:
+                        # wait callback submit new future
                         time.sleep(3)
                     continue
                 job_id = output.job_id
@@ -533,6 +542,8 @@ class GPTFactory:
                     error_jobs.append(inputs[job_id])
                 results.append(output)
                 progress_bar.update(job_tracker, advance=1, errors=len(error_jobs))
+                if tracker is not None:
+                    tracker['completed'] += 1
                 step += 1
                 if save_path is not None and save_step is not None and step % save_step == 0:
                     self.__save(inputs,results,error_jobs,save_path,step,save_total_limit)
@@ -543,7 +554,7 @@ class GPTFactory:
         return results
 
 
-def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure","oai"]='azure',worker_num:Optional[int] = None,rpm:Optional[int] = None,tpm:Optional[int] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,debug=False) -> GPTFactory:
+def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure","oai"]='azure',worker_num:Optional[int] = None,rpm:Optional[int] = None,tpm:Optional[int] = None,system_message:Optional[str]=None,detail:Literal["low","high","auto"] = "auto",temperature:float=0.7,top_p:float=0.95,max_tokens:int=800,logging_level:str="INFO") -> GPTFactory:
     """Build a GPTFactory with any number of worker. The api each worker used is smartly assigned, to balance the workload.
 
     Args:
@@ -558,7 +569,7 @@ def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure
         top_p (float, optional): GPT top_p. Defaults to 0.95.
         max_tokens (int, optional): GPT max tokens. Defaults to 800.
         system_message (Optional[str], optional): The system message. Currently, we recommend not to use a customized system message, since it seems to make the model refuse to answer some questions. Defaults to None.
-        debug (bool, optional): Whether to print debug information. Defaults to False.
+        logging_level (str, optional): The logging level. Defaults to "INFO".
     Returns:
         GPTFactory: A GPTFactory.
     """
@@ -577,4 +588,4 @@ def smart_build_factory(api_info:Sequence[Dict],model:str,service:Literal["azure
     for i in range(worker_num):
         keys_endpoints.append(api_info[i%len(api_info)])
         limitation_checker_for_each_worker.append(unique_limitation_checker[i%len(unique_limitation_checker)])
-    return GPTFactory(keys_endpoints,model,service,limitation_checker_for_each_worker,system_message,detail,temperature,top_p,max_tokens,debug)
+    return GPTFactory(keys_endpoints,model,service,limitation_checker_for_each_worker,system_message,detail,temperature,top_p,max_tokens,logging_level)
