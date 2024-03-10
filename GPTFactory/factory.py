@@ -312,6 +312,7 @@ class GPTFactory:
     def __worker(self,args):
         id = args.pop('id',None)
         job_id = args.pop('job_id',None)
+        timeout_time = args.pop('timeout_time',None)
         for chatbot in cycle(self.chatbots):
             if chatbot.check_and_set():
                 response = chatbot.complete(**args)
@@ -322,6 +323,8 @@ class GPTFactory:
             args['id'] = id
         if job_id is not None:
             args['job_id'] = job_id
+        if timeout_time is not None:
+            args['timeout_time'] = timeout_time
         output = GPTFactoryOutput(id,args,response,job_id)
         return output
 
@@ -364,8 +367,14 @@ class GPTFactory:
         output = future.result()
         if isinstance(output.response,requests.exceptions.Timeout):
             raw_input = output.input
-            new_future = self.__put(raw_input)
-            self.__all_futures.append(new_future)
+            if 'timeout_time' in raw_input:
+                if raw_input['timeout_time'] < 3:
+                    raw_input['timeout_time'] += 1       
+                    new_future = self.__put(raw_input)
+                    self.__all_futures.append(new_future)
+                else:
+                    #exceed maximum timeout retry time
+                    output.response = None
 
     def __put(self,args:dict):
         future = self.executor.submit(self.__worker,args)
@@ -397,6 +406,7 @@ class GPTFactory:
             "retry":-1,
             "delay":0.2,
             "logging_level":self.logging_level,
+            "timeout_time":0
         }
         other_args = deepcopy(kwargs)
         args.update(other_args)
