@@ -209,7 +209,7 @@ class GPT:
                 logger.debug(e)
                 self.set_running(False)
                 return requests.exceptions.Timeout()
-            except requests.RequestException as e:
+            except Exception as e:
                 logger.debug(e)
                 if 'Too Many Requests' in str(e):
                     error_message = response.json()['error']['message']
